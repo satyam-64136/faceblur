@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Stable Pro Face Blur</title>
+<style>
+  body {
+    margin: 0;
+    overflow: hidden;
+    background: #000;
+    font-family: Arial, sans-serif;
+  }
+  canvas { display: block; }
+  #status {
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    padding: 6px 12px;
+    background: rgba(0,0,0,0.6);
+    color: #fff;
+    font-size: 13px;
+    border-radius: 8px;
+    backdrop-filter: blur(6px);
+  }
+</style>
+</head>
+<body>
+
+<div id="status">Starting...</div>
+<video id="video" autoplay playsinline style="display:none;"></video>
+<canvas id="canvas"></canvas>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/face_detection.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+<script>
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const status = document.getElementById("status");
+
+let trackedFaces = [];
+const MISS_LIMIT = 20;
+
+/* ---------- CAMERA ---------- */
+async function startCamera() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { width: 1280, height: 720 }
+  });
+  video.srcObject = stream;
+
+  return new Promise(resolve => {
+    video.onloadedmetadata = () => {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      resolve();
+    };
+  });
+}
+
+/* ---------- MEDIAPIPE ---------- */
+const detector = new FaceDetection({
+  locateFile: (file) =>
+    `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}`
+});
+
+detector.setOptions({
+  model: "short",
+  minDetectionConfidence: 0.5
+});
+
+detector.onResults(onResults);
+
+function onResults(results) {
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+  let newFaces = [];
+
+  if (results.detections.length > 0) {
+    results.detections.forEach(det => {
+      const box = det.boundingBox;
+
+      newFaces.push({
+        x: box.xCenter * canvas.width,
+        y: box.yCenter * canvas.height,
+        r: Math.max(
+          box.width * canvas.width,
+          box.height * canvas.height
+        ) * 0.9,
+        missed: 0
+      });
+    });
+  }
+
+  // Instant tracking (no lag)
+  if (trackedFaces.length === 0) {
+    trackedFaces = newFaces;
+  } else {
+    trackedFaces = trackedFaces.map((oldFace, i) => {
+      if (newFaces[i]) {
+        return newFaces[i];
+      } else {
+        oldFace.missed++;
+        return oldFace;
+      }
+    });
+
+    if (newFaces.length > trackedFaces.length) {
+      trackedFaces = trackedFaces.concat(
+        newFaces.slice(trackedFaces.length)
+      );
+    }
+
+    trackedFaces = trackedFaces.filter(f => f.missed < MISS_LIMIT);
+  }
+
+  status.innerText = `Faces: ${trackedFaces.length}`;
+
+  applyBlur(trackedFaces);
+}
+
+/* ---------- CORRECT BLUR PIPELINE ---------- */
+function applyBlur(faces) {
+
+  if (faces.length === 0) return;
+
+  // Create ONE blurred frame
+  const blurCanvas = document.createElement("canvas");
+  blurCanvas.width = canvas.width;
+  blurCanvas.height = canvas.height;
+  const blurCtx = blurCanvas.getContext("2d");
+
+  blurCtx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  blurCtx.filter = "blur(55px)";
+  blurCtx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  blurCtx.filter = "none";
+
+  faces.forEach(face => {
+
+    ctx.save();
+
+    // Feather mask
+    const gradient = ctx.createRadialGradient(
+      face.x, face.y, face.r * 0.5,
+      face.x, face.y, face.r
+    );
+
+    gradient.addColorStop(0, "rgba(0,0,0,1)");
+    gradient.addColorStop(1, "rgba(0,0,0,0)");
+
+    ctx.beginPath();
+    ctx.arc(face.x, face.y, face.r, 0, Math.PI * 2);
+    ctx.closePath();
+    ctx.clip();
+
+    ctx.globalAlpha = 1;
+    ctx.drawImage(blurCanvas, 0, 0);
+
+    ctx.restore();
+  });
+}
+
+/* ---------- INIT ---------- */
+async function init() {
+  await startCamera();
+
+  const cam = new Camera(video, {
+    onFrame: async () => {
+      await detector.send({ image: video });
+    },
+    width: canvas.width,
+    height: canvas.height
+  });
+
+  cam.start();
+  status.innerText = "Face Blur Running";
+}
+
+init();
+</script>
+</body>
+</html>
