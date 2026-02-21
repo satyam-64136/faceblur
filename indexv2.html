@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Mobile Circular Face Blur</title>
+<title>Mobile Safe Face Blur</title>
 
 <style>
 body {
@@ -18,24 +18,22 @@ body {
 canvas {
   max-width: 100vw;
   max-height: 100vh;
-  width: auto;
-  height: auto;
 }
 
-  #controls {
-    position: fixed;
-    top: 15px;
-    left: 15px;
-  }
+#controls {
+  position: fixed;
+  top: 15px;
+  left: 15px;
+}
 
-  button {
-    padding: 8px 12px;
-    border: none;
-    border-radius: 8px;
-    background: rgba(0,0,0,0.6);
-    color: white;
-    font-size: 14px;
-  }
+button {
+  padding: 8px 12px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(0,0,0,0.6);
+  color: white;
+  font-size: 14px;
+}
 </style>
 </head>
 <body>
@@ -44,7 +42,7 @@ canvas {
   <button id="switchCam">Switch Camera</button>
 </div>
 
-<video id="video" autoplay playsinline style="display:none;"></video>
+<video id="video" autoplay playsinline muted style="display:none;"></video>
 <canvas id="canvas"></canvas>
 
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/face_detection.js"></script>
@@ -56,12 +54,10 @@ canvas {
    CONFIG (Mobile Optimized)
    =========================== */
 
-const BLUR_STRENGTH = 25;      // Lower for better mobile FPS
+const BLUR_STRENGTH = 25;
 const RADIUS_MULTIPLIER = 0.9;
 const FEATHER_START = 0.6;
 const MISS_LIMIT = 12;
-
-// Internal processing scale (0.5 = half resolution for speed)
 const INTERNAL_SCALE = 0.6;
 
 /* =========================== */
@@ -75,53 +71,62 @@ let currentFacingMode = "user";
 let camera;
 let trackedFaces = [];
 
-// Reusable blur canvas (IMPORTANT for mobile)
+/* Reusable blur canvas */
 const blurCanvas = document.createElement("canvas");
 const blurCtx = blurCanvas.getContext("2d");
 
 /* ===========================
-   CAMERA START (Mobile Safe)
+   SAFE CAMERA START
    =========================== */
 
 async function startCamera() {
 
-  if (camera) camera.stop();
+  try {
 
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: {
-      facingMode: currentFacingMode,
-      width: { ideal: 1280 },
-      height: { ideal: 720 }
+    // Stop previous stream safely
+    if (video.srcObject) {
+      video.srcObject.getTracks().forEach(track => track.stop());
     }
-  });
 
-  video.srcObject = stream;
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: currentFacingMode },
+      audio: false
+    });
 
-  return new Promise(resolve => {
-    video.onloadedmetadata = () => {
+    video.srcObject = stream;
 
-      // Scale down internally for performance
-      canvas.width = video.videoWidth * INTERNAL_SCALE;
-      canvas.height = video.videoHeight * INTERNAL_SCALE;
+    return new Promise(resolve => {
 
-      canvas.style.width = video.videoWidth + "px";
-      canvas.style.height = video.videoHeight + "px";
+      video.onloadedmetadata = () => {
 
-      blurCanvas.width = canvas.width;
-      blurCanvas.height = canvas.height;
+        canvas.width = video.videoWidth * INTERNAL_SCALE;
+        canvas.height = video.videoHeight * INTERNAL_SCALE;
 
-      camera = new Camera(video, {
-        onFrame: async () => {
-          await detector.send({ image: video });
-        },
-        width: canvas.width,
-        height: canvas.height
-      });
+        canvas.style.width = video.videoWidth + "px";
+        canvas.style.height = video.videoHeight + "px";
 
-      camera.start();
-      resolve();
-    };
-  });
+        blurCanvas.width = canvas.width;
+        blurCanvas.height = canvas.height;
+
+        if (camera) camera.stop();
+
+        camera = new Camera(video, {
+          onFrame: async () => {
+            await detector.send({ image: video });
+          },
+          width: canvas.width,
+          height: canvas.height
+        });
+
+        camera.start();
+        resolve();
+      };
+    });
+
+  } catch (err) {
+    console.error("Camera error:", err);
+    alert("Camera failed. Close other apps using camera and ensure HTTPS.");
+  }
 }
 
 /* =========================== */
@@ -248,6 +253,7 @@ function applyBlur(mirror) {
 /* =========================== */
 
 startCamera();
+
 </script>
 </body>
 </html>
