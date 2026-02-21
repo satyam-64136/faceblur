@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mobile Circular Face Blur</title>
+
+<style>
+body {
+  margin: 0;
+  background: #000;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+}
+
+canvas {
+  max-width: 100vw;
+  max-height: 100vh;
+  width: auto;
+  height: auto;
+}
+
+  #controls {
+    position: fixed;
+    top: 15px;
+    left: 15px;
+  }
+
+  button {
+    padding: 8px 12px;
+    border: none;
+    border-radius: 8px;
+    background: rgba(0,0,0,0.6);
+    color: white;
+    font-size: 14px;
+  }
+</style>
+</head>
+<body>
+
+<div id="controls">
+  <button id="switchCam">Switch Camera</button>
+</div>
+
+<video id="video" autoplay playsinline style="display:none;"></video>
+<canvas id="canvas"></canvas>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/face_detection.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+<script>
+
+/* ===========================
+   CONFIG (Mobile Optimized)
+   =========================== */
+
+const BLUR_STRENGTH = 25;      // Lower for better mobile FPS
+const RADIUS_MULTIPLIER = 0.9;
+const FEATHER_START = 0.6;
+const MISS_LIMIT = 12;
+
+// Internal processing scale (0.5 = half resolution for speed)
+const INTERNAL_SCALE = 0.6;
+
+/* =========================== */
+
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const switchBtn = document.getElementById("switchCam");
+
+let currentFacingMode = "user";
+let camera;
+let trackedFaces = [];
+
+// Reusable blur canvas (IMPORTANT for mobile)
+const blurCanvas = document.createElement("canvas");
+const blurCtx = blurCanvas.getContext("2d");
+
+/* ===========================
+   CAMERA START (Mobile Safe)
+   =========================== */
+
+async function startCamera() {
+
+  if (camera) camera.stop();
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: currentFacingMode,
+      width: { ideal: 1280 },
+      height: { ideal: 720 }
+    }
+  });
+
+  video.srcObject = stream;
+
+  return new Promise(resolve => {
+    video.onloadedmetadata = () => {
+
+      // Scale down internally for performance
+      canvas.width = video.videoWidth * INTERNAL_SCALE;
+      canvas.height = video.videoHeight * INTERNAL_SCALE;
+
+      canvas.style.width = video.videoWidth + "px";
+      canvas.style.height = video.videoHeight + "px";
+
+      blurCanvas.width = canvas.width;
+      blurCanvas.height = canvas.height;
+
+      camera = new Camera(video, {
+        onFrame: async () => {
+          await detector.send({ image: video });
+        },
+        width: canvas.width,
+        height: canvas.height
+      });
+
+      camera.start();
+      resolve();
+    };
+  });
+}
+
+/* =========================== */
+
+switchBtn.onclick = async () => {
+  currentFacingMode =
+    currentFacingMode === "user" ? "environment" : "user";
+  await startCamera();
+};
+
+/* =========================== */
+
+const detector = new FaceDetection({
+  locateFile: file =>
+    `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}`
+});
+
+detector.setOptions({
+  model: "short",
+  minDetectionConfidence: 0.5
+});
+
+detector.onResults(onResults);
+
+/* =========================== */
+
+function onResults(results) {
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const mirror = currentFacingMode === "user";
+
+  ctx.save();
+  if (mirror) {
+    ctx.scale(-1, 1);
+    ctx.drawImage(video, -canvas.width, 0, canvas.width, canvas.height);
+  } else {
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  }
+  ctx.restore();
+
+  let newFaces = [];
+
+  if (results.detections.length > 0) {
+    results.detections.forEach(det => {
+
+      const box = det.boundingBox;
+
+      let x = box.xCenter * canvas.width;
+      if (mirror) x = canvas.width - x;
+
+      newFaces.push({
+        x: x,
+        y: box.yCenter * canvas.height,
+        r: Math.max(
+          box.width * canvas.width,
+          box.height * canvas.height
+        ) * RADIUS_MULTIPLIER,
+        missed: 0
+      });
+    });
+  }
+
+  if (trackedFaces.length === 0) {
+    trackedFaces = newFaces;
+  } else {
+    trackedFaces = trackedFaces.map((oldFace, i) => {
+      if (newFaces[i]) return newFaces[i];
+      oldFace.missed++;
+      return oldFace;
+    });
+
+    trackedFaces = trackedFaces.filter(f => f.missed < MISS_LIMIT);
+  }
+
+  applyBlur(mirror);
+}
+
+/* ===========================
+   MOBILE SAFE BLUR
+   =========================== */
+
+function applyBlur(mirror) {
+
+  if (trackedFaces.length === 0) return;
+
+  blurCtx.clearRect(0, 0, blurCanvas.width, blurCanvas.height);
+
+  blurCtx.save();
+  if (mirror) {
+    blurCtx.scale(-1, 1);
+    blurCtx.drawImage(video, -canvas.width, 0, canvas.width, canvas.height);
+  } else {
+    blurCtx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  }
+  blurCtx.restore();
+
+  blurCtx.filter = `blur(${BLUR_STRENGTH}px)`;
+  blurCtx.drawImage(blurCanvas, 0, 0);
+  blurCtx.filter = "none";
+
+  trackedFaces.forEach(face => {
+
+    ctx.save();
+
+    const gradient = ctx.createRadialGradient(
+      face.x, face.y, face.r * FEATHER_START,
+      face.x, face.y, face.r
+    );
+
+    gradient.addColorStop(0, "rgba(0,0,0,1)");
+    gradient.addColorStop(1, "rgba(0,0,0,0)");
+
+    ctx.beginPath();
+    ctx.arc(face.x, face.y, face.r, 0, Math.PI * 2);
+    ctx.clip();
+
+    ctx.drawImage(blurCanvas, 0, 0);
+
+    ctx.restore();
+  });
+}
+
+/* =========================== */
+
+startCamera();
+</script>
+</body>
+</html>
