@@ -2,31 +2,48 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Stable Pro Face Blur</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mobile Circular Face Blur</title>
+
 <style>
-  body {
-    margin: 0;
-    overflow: hidden;
-    background: #000;
-    font-family: Arial, sans-serif;
-  }
-  canvas { display: block; }
-  #status {
+body {
+  margin: 0;
+  background: #000;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+}
+
+canvas {
+  max-width: 100vw;
+  max-height: 100vh;
+  width: auto;
+  height: auto;
+}
+
+  #controls {
     position: fixed;
-    top: 12px;
-    left: 12px;
-    padding: 6px 12px;
-    background: rgba(0,0,0,0.6);
-    color: #fff;
-    font-size: 13px;
+    top: 15px;
+    left: 15px;
+  }
+
+  button {
+    padding: 8px 12px;
+    border: none;
     border-radius: 8px;
-    backdrop-filter: blur(6px);
+    background: rgba(0,0,0,0.6);
+    color: white;
+    font-size: 14px;
   }
 </style>
 </head>
 <body>
 
-<div id="status">Starting...</div>
+<div id="controls">
+  <button id="switchCam">Switch Camera</button>
+</div>
+
 <video id="video" autoplay playsinline style="display:none;"></video>
 <canvas id="canvas"></canvas>
 
@@ -34,31 +51,88 @@
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
 
 <script>
+
+/* ===========================
+   CONFIGURATION VALUES
+   =========================== */
+
+// Blur intensity (increase for stronger blur)
+const BLUR_STRENGTH = 35;  
+
+// How large the blur circle should be relative to face
+const RADIUS_MULTIPLIER = 0.7;  
+
+// Feather softness (0.3 = sharper edge, 0.6 = softer edge)
+const FEATHER_START = 1;  
+
+// Frames to keep face if temporarily lost
+const MISS_LIMIT = 15;
+
+
+/* ===========================
+   BASIC SETUP
+   =========================== */
+
 const video = document.getElementById("video");
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
-const status = document.getElementById("status");
+const switchBtn = document.getElementById("switchCam");
 
+let currentFacingMode = "user";
+let camera;
 let trackedFaces = [];
-const MISS_LIMIT = 20;
 
-/* ---------- CAMERA ---------- */
+
+/* ===========================
+   CAMERA START
+   =========================== */
+
 async function startCamera() {
+
+  if (camera) camera.stop();
+
   const stream = await navigator.mediaDevices.getUserMedia({
-    video: { width: 1280, height: 720 }
+    video: { facingMode: currentFacingMode }
   });
+
   video.srcObject = stream;
 
   return new Promise(resolve => {
     video.onloadedmetadata = () => {
+
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
+
+      camera = new Camera(video, {
+        onFrame: async () => {
+          await detector.send({ image: video });
+        },
+        width: video.videoWidth,
+        height: video.videoHeight
+      });
+
+      camera.start();
       resolve();
     };
   });
 }
 
-/* ---------- MEDIAPIPE ---------- */
+
+/* ===========================
+   SWITCH CAMERA BUTTON
+   =========================== */
+
+switchBtn.onclick = async () => {
+  currentFacingMode =
+    currentFacingMode === "user" ? "environment" : "user";
+  await startCamera();
+};
+
+
+/* ===========================
+   MEDIAPIPE SETUP
+   =========================== */
+
 const detector = new FaceDetection({
   locateFile: (file) =>
     `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}`
@@ -71,79 +145,101 @@ detector.setOptions({
 
 detector.onResults(onResults);
 
+
+/* ===========================
+   FACE DETECTION LOGIC
+   =========================== */
+
 function onResults(results) {
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+  const mirror = currentFacingMode === "user";
+
+  // Draw base video (mirrored if front camera)
+  ctx.save();
+  if (mirror) {
+    ctx.scale(-1, 1);
+    ctx.drawImage(video, -canvas.width, 0);
+  } else {
+    ctx.drawImage(video, 0, 0);
+  }
+  ctx.restore();
 
   let newFaces = [];
 
   if (results.detections.length > 0) {
     results.detections.forEach(det => {
+
       const box = det.boundingBox;
 
+      let x = box.xCenter * canvas.width;
+      if (mirror) x = canvas.width - x;
+
       newFaces.push({
-        x: box.xCenter * canvas.width,
+        x: x,
         y: box.yCenter * canvas.height,
         r: Math.max(
           box.width * canvas.width,
           box.height * canvas.height
-        ) * 0.9,
+        ) * RADIUS_MULTIPLIER,
         missed: 0
       });
     });
   }
 
-  // Instant tracking (no lag)
+  // Tracking memory
   if (trackedFaces.length === 0) {
     trackedFaces = newFaces;
   } else {
     trackedFaces = trackedFaces.map((oldFace, i) => {
-      if (newFaces[i]) {
-        return newFaces[i];
-      } else {
-        oldFace.missed++;
-        return oldFace;
-      }
+      if (newFaces[i]) return newFaces[i];
+      oldFace.missed++;
+      return oldFace;
     });
-
-    if (newFaces.length > trackedFaces.length) {
-      trackedFaces = trackedFaces.concat(
-        newFaces.slice(trackedFaces.length)
-      );
-    }
 
     trackedFaces = trackedFaces.filter(f => f.missed < MISS_LIMIT);
   }
 
-  status.innerText = `Faces: ${trackedFaces.length}`;
-
-  applyBlur(trackedFaces);
+  applyBlur(mirror);
 }
 
-/* ---------- CORRECT BLUR PIPELINE ---------- */
-function applyBlur(faces) {
 
-  if (faces.length === 0) return;
+/* ===========================
+   CIRCULAR FEATHERED BLUR
+   =========================== */
 
-  // Create ONE blurred frame
+function applyBlur(mirror) {
+
+  if (trackedFaces.length === 0) return;
+
+  // Create blurred frame
   const blurCanvas = document.createElement("canvas");
   blurCanvas.width = canvas.width;
   blurCanvas.height = canvas.height;
   const blurCtx = blurCanvas.getContext("2d");
 
-  blurCtx.drawImage(video, 0, 0, canvas.width, canvas.height);
-  blurCtx.filter = "blur(55px)";
-  blurCtx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  blurCtx.save();
+  if (mirror) {
+    blurCtx.scale(-1, 1);
+    blurCtx.drawImage(video, -canvas.width, 0);
+  } else {
+    blurCtx.drawImage(video, 0, 0);
+  }
+  blurCtx.restore();
+
+  // Apply blur strength here
+  blurCtx.filter = `blur(${BLUR_STRENGTH}px)`;
+  blurCtx.drawImage(blurCanvas, 0, 0);
   blurCtx.filter = "none";
 
-  faces.forEach(face => {
+  // Draw circular feathered mask
+  trackedFaces.forEach(face => {
 
     ctx.save();
 
-    // Feather mask
     const gradient = ctx.createRadialGradient(
-      face.x, face.y, face.r * 0.5,
+      face.x, face.y, face.r * FEATHER_START,
       face.x, face.y, face.r
     );
 
@@ -155,30 +251,19 @@ function applyBlur(faces) {
     ctx.closePath();
     ctx.clip();
 
-    ctx.globalAlpha = 1;
     ctx.drawImage(blurCanvas, 0, 0);
 
     ctx.restore();
   });
 }
 
-/* ---------- INIT ---------- */
-async function init() {
-  await startCamera();
 
-  const cam = new Camera(video, {
-    onFrame: async () => {
-      await detector.send({ image: video });
-    },
-    width: canvas.width,
-    height: canvas.height
-  });
+/* ===========================
+   INIT
+   =========================== */
 
-  cam.start();
-  status.innerText = "Face Blur Running";
-}
+startCamera();
 
-init();
 </script>
 </body>
 </html>
